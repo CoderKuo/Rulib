@@ -1,5 +1,12 @@
 package com.dakuo.rulib.common.database
 
+private val IDENTIFIER_PATTERN = Regex("^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+internal fun escapeIdentifier(name: String): String {
+    require(name.matches(IDENTIFIER_PATTERN)) { "Invalid SQL identifier: $name" }
+    return "`$name`"
+}
+
 object SQLTemplate {
 
     private val dataSource: javax.sql.DataSource by lazy {

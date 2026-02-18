@@ -63,7 +63,7 @@ package com.dakuo.rulib.common.regex
  */
 object Regex {
     // 缓存已编译的正则表达式
-    private val patternCache = mutableMapOf<String, com.google.code.regexp.Pattern>()
+    private val patternCache = java.util.concurrent.ConcurrentHashMap<String, com.google.code.regexp.Pattern>()
     private const val MAX_CACHE_SIZE = 1000 // 最大缓存数量
 
     /**
@@ -72,13 +72,11 @@ object Regex {
      * @return 命名正则表达式对象
      */
     fun create(pattern: String): com.google.code.regexp.Pattern {
-        return patternCache.getOrPut(pattern) {
-            // 如果缓存过大,清除一半的缓存
-            if (patternCache.size > MAX_CACHE_SIZE) {
-                val removeCount = MAX_CACHE_SIZE / 2
-                patternCache.keys.take(removeCount).forEach { patternCache.remove(it) }
-            }
-            com.google.code.regexp.Pattern.compile(pattern)
+        if (patternCache.size > MAX_CACHE_SIZE) {
+            patternCache.clear()
+        }
+        return patternCache.computeIfAbsent(pattern) {
+            com.google.code.regexp.Pattern.compile(it)
         }
     }
 

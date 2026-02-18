@@ -5,7 +5,7 @@ import taboolib.module.nms.getItemTag
 
 class NbtMatcher(private val matchType: MatchType) : ItemMatcherCondition {
     override fun matches(item: ItemStack, expression: String): Boolean {
-        val (key, value) = expression.split(":")
+        val (key, value) = expression.split(":", limit = 2)
         val itemTag = item.getItemTag() ?: return false
         return itemTag.keys.find {
             when (matchType) {

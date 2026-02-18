@@ -8,7 +8,9 @@ import taboolib.module.configuration.Configuration
 import java.io.Closeable
 import java.io.File
 
-fun getMainConfig() = Configuration.loadFromFile(File(getDataFolder(), "config.yml"))
+private val mainConfigInstance by lazy { Configuration.loadFromFile(File(getDataFolder(), "config.yml")) }
+
+fun getMainConfig() = mainConfigInstance
 
 
 inline fun <reified T> registerListener(

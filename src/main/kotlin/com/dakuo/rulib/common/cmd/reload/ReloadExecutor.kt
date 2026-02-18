@@ -18,14 +18,16 @@ annotation class Reload(val priority: Int = 10)
 @Awake
 object ReloadExecutor : ClassVisitor(-10) {
 
-    private val reloadMethods = mutableSetOf<Triple<ClassMethod, Any, Int>>()
-    private val reloadConfiguration = mutableSetOf<Triple<Configuration, Any, Int>>()
+    private val reloadMethods = mutableListOf<Triple<ClassMethod, Any, Int>>()
+    private val reloadConfiguration = mutableListOf<Triple<Configuration, Any, Int>>()
+    private var sorted = false
 
     override fun visit(field: ClassField, owner: ReflexClass) {
         if (field.isAnnotationPresent(Reload::class.java)) {
             val priority = field.getAnnotation(Reload::class.java).property<Int>("priority") ?: 10
             owner.getInstance()?.let { instance ->
                 reloadConfiguration.add(Triple(field.get(instance) as Configuration, instance, priority))
+                sorted = false
             }
         }
     }
@@ -36,15 +38,19 @@ object ReloadExecutor : ClassVisitor(-10) {
             val priority = method.getAnnotation(Reload::class.java).property<Int>("priority") ?: 10
             owner.getInstance()?.let { instance ->
                 reloadMethods.add(Triple(method, instance, priority))
+                sorted = false
             }
         }
     }
 
     fun execute() {
-        reloadConfiguration.sortedBy { it.third }.forEach { it.first.reload() }
-        reloadMethods
-            .sortedBy { it.third }
-            .forEach { it.first.invoke(it.second) }
+        if (!sorted) {
+            reloadConfiguration.sortBy { it.third }
+            reloadMethods.sortBy { it.third }
+            sorted = true
+        }
+        reloadConfiguration.forEach { it.first.reload() }
+        reloadMethods.forEach { it.first.invoke(it.second) }
     }
 
     override fun getLifeCycle(): LifeCycle {

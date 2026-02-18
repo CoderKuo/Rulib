@@ -8,7 +8,7 @@ import io.izzel.taboolib.gradle.MinecraftChat
 
 plugins {
     java
-    id("io.izzel.taboolib") version "2.0.23"
+    id("io.izzel.taboolib") version "2.0.31"
     id("org.jetbrains.kotlin.jvm") version "1.8.22"
     `maven-publish`
 }
@@ -28,7 +28,7 @@ taboolib {
     description {
         name = "Rulib"
     }
-    version { taboolib = "6.2.3-8cc2f66" }
+    version { taboolib = "6.2.4-86dd2bf" }
 
     isSubproject = true
 

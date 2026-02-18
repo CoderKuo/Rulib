@@ -14,12 +14,12 @@ class ItemTextMatcher {
         val conditions = parseExpression(expression)
 
         // 检查各个条件是否都匹配
-        return conditions.all { condition -> condition.matches(item, expression) }
+        return conditions.all { (condition, exp) -> condition.matches(item, exp) }
     }
 
     // 解析表达式，自动推断matchType
-    private fun parseExpression(expression: String): List<ItemMatcherCondition> {
-        val conditions = mutableListOf<ItemMatcherCondition>()
+    private fun parseExpression(expression: String): List<Pair<ItemMatcherCondition, String>> {
+        val conditions = mutableListOf<Pair<ItemMatcherCondition, String>>()
 
         // 解析表达式中的各个部分
         val parts = expression.split(",")
@@ -27,19 +27,19 @@ class ItemTextMatcher {
             when {
                 part.startsWith("name:") -> {
                     val nameExp = part.substringAfter("name:")
-                    conditions.add(NameMatcher(inferMatchType(nameExp), true))  // 根据表达式推断matchType
+                    conditions.add(NameMatcher(inferMatchType(nameExp), true) to nameExp)
                 }
                 part.startsWith("lore:") -> {
                     val loreExp = part.substringAfter("lore:")
-                    conditions.add(LoreMatcher(inferMatchType(loreExp), true))  // 根据表达式推断matchType
+                    conditions.add(LoreMatcher(inferMatchType(loreExp), true) to loreExp)
                 }
                 part.startsWith("nbt:") -> {
                     val nbtExp = part.substringAfter("nbt:")
-                    conditions.add(NbtMatcher(inferMatchType(nbtExp)))  // NBT匹配器没有matchType
+                    conditions.add(NbtMatcher(inferMatchType(nbtExp)) to nbtExp)
                 }
                 part.startsWith("material:") || part.startsWith("type:") -> {
-                    val materialExp = part.substringAfter("material:")
-                    conditions.add(MaterialMatcher(inferMatchType(materialExp)))  // 根据表达式推断matchType
+                    val materialExp = if (part.startsWith("type:")) part.substringAfter("type:") else part.substringAfter("material:")
+                    conditions.add(MaterialMatcher(inferMatchType(materialExp)) to materialExp)
                 }
             }
         }

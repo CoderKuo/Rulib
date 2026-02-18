@@ -60,9 +60,9 @@ object Database {
      * 插入数据
      */
     fun insert(table: String, data: Map<String, Any?>) {
-        val columns = data.keys.joinToString(",")
+        val columns = data.keys.joinToString(",") { escapeIdentifier(it) }
         val placeholders = data.keys.joinToString(",") { "?" }
-        val sql = "INSERT INTO $table ($columns) VALUES ($placeholders)"
+        val sql = "INSERT INTO ${escapeIdentifier(table)} ($columns) VALUES ($placeholders)"
         update(sql, *data.values.toTypedArray())
     }
 
@@ -70,8 +70,8 @@ object Database {
      * 更新数据
      */
     fun update(table: String, data: Map<String, Any?>, where: String, vararg params: Any?) {
-        val setClause = data.keys.joinToString(",") { "$it=?" }
-        val sql = "UPDATE $table SET $setClause WHERE $where"
+        val setClause = data.keys.joinToString(",") { "${escapeIdentifier(it)}=?" }
+        val sql = "UPDATE ${escapeIdentifier(table)} SET $setClause WHERE $where"
         val allParams = data.values.toList() + params.toList()
         update(sql, *allParams.toTypedArray())
     }
@@ -80,7 +80,7 @@ object Database {
      * 删除数据
      */
     fun delete(table: String, where: String, vararg params: Any?) {
-        val sql = "DELETE FROM $table WHERE $where"
+        val sql = "DELETE FROM ${escapeIdentifier(table)} WHERE $where"
         update(sql, *params)
     }
 
@@ -95,7 +95,7 @@ object Database {
         vararg params: Any?
     ): List<T> {
         val whereClause = where?.let { "WHERE $it" } ?: ""
-        val sql = "SELECT $columns FROM $table $whereClause"
+        val sql = "SELECT $columns FROM ${escapeIdentifier(table)} $whereClause"
         return query(sql, mapper, *params)
     }
 

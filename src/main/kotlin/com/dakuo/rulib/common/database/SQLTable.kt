@@ -77,6 +77,7 @@ class SQLTable private constructor(
     private val columns: MutableList<Column> = mutableListOf(),
     private val indexes: MutableList<Triple<String, Any, Boolean>> = mutableListOf()
 ) {
+    private val safeTableName = escapeIdentifier(tableName)
 
     /**
      * 创建表
@@ -84,7 +85,7 @@ class SQLTable private constructor(
     fun create() {
         val columnDefinitions = columns.joinToString(",\n") { it.getDefinition() }
         val sql = """
-            CREATE TABLE IF NOT EXISTS $tableName (
+            CREATE TABLE IF NOT EXISTS $safeTableName (
             $columnDefinitions
             )
         """.trimIndent()
@@ -139,9 +140,11 @@ class SQLTable private constructor(
             is List<*> -> columns.filterIsInstance<String>()
             else -> throw IllegalArgumentException("columns must be String or List<String>")
         }
-        
+
         val uniqueStr = if (unique) "UNIQUE" else ""
-        val sql = "CREATE $uniqueStr INDEX $indexName ON $tableName (${columnList.joinToString(",")})"
+        val safeIndexName = escapeIdentifier(indexName)
+        val safeColumns = columnList.joinToString(",") { escapeIdentifier(it) }
+        val sql = "CREATE $uniqueStr INDEX $safeIndexName ON $safeTableName ($safeColumns)"
         SQLTemplate.update(sql)
     }
 
@@ -167,9 +170,10 @@ class SQLTable private constructor(
             return
         }
         
+        val safeIndexName = escapeIdentifier(indexName)
         val sql = when (Database.getDatabaseType()!!.lowercase()) {
-            "mysql" -> "DROP INDEX $indexName ON $tableName"
-            "sqlite" -> "DROP INDEX IF EXISTS $indexName"
+            "mysql" -> "DROP INDEX $safeIndexName ON $safeTableName"
+            "sqlite" -> "DROP INDEX IF EXISTS $safeIndexName"
             else -> throw IllegalArgumentException("Unsupported database type")
         }
         SQLTemplate.update(sql)
@@ -179,9 +183,9 @@ class SQLTable private constructor(
      * 插入数据
      */
     fun insert(data: Map<String, Any?>) {
-        val columns = data.keys.joinToString(",")
+        val columns = data.keys.joinToString(",") { escapeIdentifier(it) }
         val placeholders = data.keys.joinToString(",") { "?" }
-        val sql = "INSERT INTO $tableName ($columns) VALUES ($placeholders)"
+        val sql = "INSERT INTO $safeTableName ($columns) VALUES ($placeholders)"
         SQLTemplate.update(sql, *data.values.toTypedArray())
     }
 
@@ -189,8 +193,8 @@ class SQLTable private constructor(
      * 更新数据
      */
     fun update(data: Map<String, Any?>, where: String, vararg params: Any?) {
-        val setClause = data.keys.joinToString(",") { "$it=?" }
-        val sql = "UPDATE $tableName SET $setClause WHERE $where"
+        val setClause = data.keys.joinToString(",") { "${escapeIdentifier(it)}=?" }
+        val sql = "UPDATE $safeTableName SET $setClause WHERE $where"
         val allParams = data.values.toList() + params.toList()
         SQLTemplate.update(sql, *allParams.toTypedArray())
     }
@@ -199,7 +203,7 @@ class SQLTable private constructor(
      * 删除数据
      */
     fun delete(where: String, vararg params: Any?) {
-        val sql = "DELETE FROM $tableName WHERE $where"
+        val sql = "DELETE FROM $safeTableName WHERE $where"
         SQLTemplate.update(sql, *params)
     }
 
@@ -213,7 +217,7 @@ class SQLTable private constructor(
         vararg params: Any?
     ): List<T> {
         val whereClause = where?.let { "WHERE $it" } ?: ""
-        val sql = "SELECT $columns FROM $tableName $whereClause"
+        val sql = "SELECT $columns FROM $safeTableName $whereClause"
         return SQLTemplate.query(sql, mapper, *params)
     }
     /**
@@ -228,6 +232,7 @@ class SQLTable private constructor(
         val defaultValue: String? = null
     ) {
         fun getDefinition(): String {
+            val safeName = escapeIdentifier(name)
             val constraints = mutableListOf<String>()
             if (primaryKey) {
                 if (autoIncrement) {
@@ -236,7 +241,7 @@ class SQLTable private constructor(
                         if (type !is ColumnType.Int) {
                             throw IllegalStateException("SQLite AUTOINCREMENT column must be INTEGER type")
                         }
-                        return "$name INTEGER PRIMARY KEY AUTOINCREMENT"
+                        return "$safeName INTEGER PRIMARY KEY AUTOINCREMENT"
                     } else {
                         constraints.add("PRIMARY KEY AUTO_INCREMENT")
                     }
@@ -247,7 +252,7 @@ class SQLTable private constructor(
             if (notNull) constraints.add("NOT NULL")
             if (defaultValue != null) constraints.add("DEFAULT $defaultValue")
 
-            return "$name ${type.toSql(Database.getDatabaseType()!!)} ${constraints.joinToString(" ")}"
+            return "$safeName ${type.toSql(Database.getDatabaseType()!!)} ${constraints.joinToString(" ")}"
         }
     }
 
@@ -378,7 +383,7 @@ class SQLTable private constructor(
      */
     fun <R> workspace(block: TableContext.() -> R): R {
         return SQLTemplate.workspace {
-            TableContext(this, tableName).block()
+            TableContext(this).block()
         }
     }
 
@@ -397,16 +402,15 @@ class SQLTable private constructor(
      * 表操作上下文
      */
     inner class TableContext(
-        private val sqlContext: SQLTemplate.SQLContext,
-        private val tableName: String
+        private val sqlContext: SQLTemplate.SQLContext
     ) {
         /**
          * 插入数据
          */
         fun insert(data: Map<String, Any?>) {
-            val columns = data.keys.joinToString(",")
+            val columns = data.keys.joinToString(",") { escapeIdentifier(it) }
             val placeholders = data.keys.joinToString(",") { "?" }
-            val sql = "INSERT INTO $tableName ($columns) VALUES ($placeholders)"
+            val sql = "INSERT INTO $safeTableName ($columns) VALUES ($placeholders)"
             sqlContext.update(sql, *data.values.toTypedArray())
         }
 
@@ -414,8 +418,8 @@ class SQLTable private constructor(
          * 更新数据
          */
         fun update(data: Map<String, Any?>, where: String, vararg params: Any?): Int {
-            val setClause = data.keys.joinToString(",") { "$it=?" }
-            val sql = "UPDATE $tableName SET $setClause WHERE $where"
+            val setClause = data.keys.joinToString(",") { "${escapeIdentifier(it)}=?" }
+            val sql = "UPDATE $safeTableName SET $setClause WHERE $where"
             val allParams = data.values.toList() + params.toList()
             return sqlContext.update(sql, *allParams.toTypedArray())
         }
@@ -424,7 +428,7 @@ class SQLTable private constructor(
          * 删除数据
          */
         fun delete(where: String, vararg params: Any?) {
-            val sql = "DELETE FROM $tableName WHERE $where"
+            val sql = "DELETE FROM $safeTableName WHERE $where"
             sqlContext.update(sql, *params)
         }
 
@@ -438,7 +442,7 @@ class SQLTable private constructor(
             vararg params: Any?
         ): List<T> {
             val whereClause = where?.let { "WHERE $it" } ?: ""
-            val sql = "SELECT $columns FROM $tableName $whereClause"
+            val sql = "SELECT $columns FROM $safeTableName $whereClause"
             return sqlContext.query(sql, mapper, *params)
         }
 
