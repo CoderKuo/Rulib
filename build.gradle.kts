@@ -24,6 +24,7 @@ taboolib {
         install(BukkitNMS)
         install(BukkitNMSItemTag)
         install(BukkitNMSUtil)
+        install(BukkitHook)
     }
     description {
         name = "Rulib"

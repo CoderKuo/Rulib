@@ -2,6 +2,7 @@ package com.dakuo.rulib.common.database
 
 import com.dakuo.rulib.common.getMainConfig
 import taboolib.common.platform.function.getDataFolder
+import taboolib.module.database.HostPostgreSQL
 import taboolib.module.database.getHost
 import java.io.File
 import javax.sql.DataSource
@@ -12,6 +13,7 @@ object Database {
         when (getDatabaseType()?.lowercase()) {
             "sqlite" -> getSQLiteHost().createDataSource()
             "mysql" -> getMysqlHost().createDataSource()
+            "postgresql" -> getPostgresqlHost().createDataSource()
             else -> throw IllegalArgumentException("Invalid database type: ${getDatabaseType()}")
         }
     }
@@ -19,6 +21,8 @@ object Database {
     private fun getSQLiteHost() = File(getDataFolder(), "data.db").getHost()
 
     private fun getMysqlHost() = getMainConfig().getHost("database.mysql")
+
+    private fun getPostgresqlHost() = HostPostgreSQL(getMainConfig().getConfigurationSection("database.postgresql")!!)
 
     fun getDatabaseType() = getMainConfig().getString("database.type")
 
@@ -104,6 +108,15 @@ object Database {
      */
     fun <R> workspace(block: SQLTemplate.SQLContext.() -> R): R {
         return SQLTemplate.workspace(block)
+    }
+
+    /**
+     * 在事务中执行多个数据库操作
+     */
+    fun <R> transaction(block: SQLTemplate.SQLContext.() -> R): R {
+        return workspace {
+            transaction { block() }
+        }
     }
 }
 

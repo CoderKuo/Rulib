@@ -71,13 +71,46 @@ package com.dakuo.rulib.common.database
  *
  * // 6. 删除数据
  * userTable.delete("username = ?", "张三")
+ *
+ * // 7. 查询单条数据
+ * val user = userTable.selectOne(
+ *     where = "id = ?",
+ *     mapper = { rs -> rs.getString("username") },
+ *     params = 1
+ * )
+ *
+ * // 8. 计数与存在检查
+ * val total = userTable.count()
+ * val adultCount = userTable.count("age >= ?", 18)
+ * val exists = userTable.exists("username = ?", "张三")
+ *
+ * // 9. 插入或更新（Upsert）
+ * userTable.insertOrUpdate(
+ *     data = mapOf("id" to 1, "username" to "张三", "age" to 25),
+ *     keys = listOf("id")
+ * )
+ *
+ * // 10. 批量插入
+ * userTable.batchInsert(listOf(
+ *     mapOf("username" to "张三", "age" to 18),
+ *     mapOf("username" to "李四", "age" to 20)
+ * ))
+ *
+ * // 11. 检查表是否存在
+ * if (userTable.tableExists()) { ... }
+ *
+ * // 12. 添加新列（表结构迁移）
+ * userTable.addColumn("email") {
+ *     type(VARCHAR(100))
+ *     default("''")
+ * }
  */
 class SQLTable private constructor(
     private val tableName: String,
     private val columns: MutableList<Column> = mutableListOf(),
     private val indexes: MutableList<Triple<String, Any, Boolean>> = mutableListOf()
 ) {
-    private val safeTableName = escapeIdentifier(tableName)
+    private val safeTableName by lazy { escapeIdentifier(tableName) }
 
     /**
      * 创建表
@@ -90,11 +123,65 @@ class SQLTable private constructor(
             )
         """.trimIndent()
         SQLTemplate.update(sql)
-        
+
         // 创建表后再创建索引
         indexes.forEach { (name, cols, unique) ->
             createIndex(name, cols, unique)
         }
+    }
+
+    /**
+     * 检查表是否存在
+     */
+    fun tableExists(): Boolean {
+        return when (Database.getDatabaseType()!!.lowercase()) {
+            "mysql" -> {
+                val sql = "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?"
+                SQLTemplate.query(sql, { rs -> rs.getInt(1) }, tableName).first() > 0
+            }
+            "sqlite" -> {
+                val sql = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?"
+                SQLTemplate.query(sql, { rs -> rs.getInt(1) }, tableName).first() > 0
+            }
+            "postgresql" -> {
+                val sql = "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = ?"
+                SQLTemplate.query(sql, { rs -> rs.getInt(1) }, tableName).first() > 0
+            }
+            else -> throw IllegalArgumentException("Unsupported database type")
+        }
+    }
+
+    /**
+     * 检查列是否存在
+     */
+    private fun columnExists(columnName: String): Boolean {
+        return when (Database.getDatabaseType()!!.lowercase()) {
+            "mysql" -> {
+                val sql = "SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?"
+                SQLTemplate.query(sql, { rs -> rs.getInt(1) }, tableName, columnName).first() > 0
+            }
+            "sqlite" -> {
+                val results = SQLTemplate.query("PRAGMA table_info($safeTableName)", { rs -> rs.getString("name") })
+                results.any { it == columnName }
+            }
+            "postgresql" -> {
+                val sql = "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = ? AND column_name = ?"
+                SQLTemplate.query(sql, { rs -> rs.getInt(1) }, tableName, columnName).first() > 0
+            }
+            else -> throw IllegalArgumentException("Unsupported database type")
+        }
+    }
+
+    /**
+     * 添加新列（表结构迁移），如果列已存在则跳过
+     */
+    fun addColumn(name: String, init: ColumnBuilder.() -> Unit) {
+        if (columnExists(name)) return
+        val builder = ColumnBuilder(name)
+        builder.init()
+        val column = builder.build()
+        val sql = "ALTER TABLE $safeTableName ADD COLUMN ${column.getDefinition()}"
+        SQLTemplate.update(sql)
     }
 
     /**
@@ -104,19 +191,28 @@ class SQLTable private constructor(
         return when (Database.getDatabaseType()!!.lowercase()) {
             "mysql" -> {
                 val sql = """
-                    SELECT COUNT(*) FROM information_schema.STATISTICS 
-                    WHERE table_schema = DATABASE() 
-                    AND TABLE_NAME = ? 
+                    SELECT COUNT(*) FROM information_schema.STATISTICS
+                    WHERE table_schema = DATABASE()
+                    AND TABLE_NAME = ?
                     AND INDEX_NAME = ?
                 """.trimIndent()
                 SQLTemplate.query(sql, { rs -> rs.getInt(1) }, tableName, indexName).first() > 0
             }
             "sqlite" -> {
                 val sql = """
-                    SELECT COUNT(*) FROM sqlite_master 
-                    WHERE type = 'index' 
-                    AND tbl_name = ? 
+                    SELECT COUNT(*) FROM sqlite_master
+                    WHERE type = 'index'
+                    AND tbl_name = ?
                     AND name = ?
+                """.trimIndent()
+                SQLTemplate.query(sql, { rs -> rs.getInt(1) }, tableName, indexName).first() > 0
+            }
+            "postgresql" -> {
+                val sql = """
+                    SELECT COUNT(*) FROM pg_indexes
+                    WHERE schemaname = 'public'
+                    AND tablename = ?
+                    AND indexname = ?
                 """.trimIndent()
                 SQLTemplate.query(sql, { rs -> rs.getInt(1) }, tableName, indexName).first() > 0
             }
@@ -169,11 +265,11 @@ class SQLTable private constructor(
         if (!indexExists(indexName)) {
             return
         }
-        
+
         val safeIndexName = escapeIdentifier(indexName)
         val sql = when (Database.getDatabaseType()!!.lowercase()) {
             "mysql" -> "DROP INDEX $safeIndexName ON $safeTableName"
-            "sqlite" -> "DROP INDEX IF EXISTS $safeIndexName"
+            "sqlite", "postgresql" -> "DROP INDEX IF EXISTS $safeIndexName"
             else -> throw IllegalArgumentException("Unsupported database type")
         }
         SQLTemplate.update(sql)
@@ -187,6 +283,104 @@ class SQLTable private constructor(
         val placeholders = data.keys.joinToString(",") { "?" }
         val sql = "INSERT INTO $safeTableName ($columns) VALUES ($placeholders)"
         SQLTemplate.update(sql, *data.values.toTypedArray())
+    }
+
+    /**
+     * 插入或更新数据（Upsert）
+     * @param data 要插入/更新的数据
+     * @param keys 用于冲突检测的唯一键列名列表
+     */
+    fun insertOrUpdate(data: Map<String, Any?>, keys: List<String>) {
+        val columns = data.keys.joinToString(",") { escapeIdentifier(it) }
+        val placeholders = data.keys.joinToString(",") { "?" }
+        val updateCols = data.keys.filter { it !in keys }
+
+        val sql = if (updateCols.isEmpty()) {
+            when (Database.getDatabaseType()!!.lowercase()) {
+                "mysql" -> "INSERT IGNORE INTO $safeTableName ($columns) VALUES ($placeholders)"
+                "sqlite" -> "INSERT OR IGNORE INTO $safeTableName ($columns) VALUES ($placeholders)"
+                "postgresql" -> {
+                    val conflictCols = keys.joinToString(",") { escapeIdentifier(it) }
+                    "INSERT INTO $safeTableName ($columns) VALUES ($placeholders) ON CONFLICT($conflictCols) DO NOTHING"
+                }
+                else -> throw IllegalArgumentException("Unsupported database type")
+            }
+        } else {
+            when (Database.getDatabaseType()!!.lowercase()) {
+                "mysql" -> {
+                    val updateClause = updateCols.joinToString(",") {
+                        "${escapeIdentifier(it)}=VALUES(${escapeIdentifier(it)})"
+                    }
+                    "INSERT INTO $safeTableName ($columns) VALUES ($placeholders) ON DUPLICATE KEY UPDATE $updateClause"
+                }
+                "sqlite", "postgresql" -> {
+                    val conflictCols = keys.joinToString(",") { escapeIdentifier(it) }
+                    val updateClause = updateCols.joinToString(",") {
+                        "${escapeIdentifier(it)}=excluded.${escapeIdentifier(it)}"
+                    }
+                    "INSERT INTO $safeTableName ($columns) VALUES ($placeholders) ON CONFLICT($conflictCols) DO UPDATE SET $updateClause"
+                }
+                else -> throw IllegalArgumentException("Unsupported database type")
+            }
+        }
+        SQLTemplate.update(sql, *data.values.toTypedArray())
+    }
+
+    /**
+     * 批量插入数据（自动包裹事务）
+     */
+    fun batchInsert(dataList: List<Map<String, Any?>>) {
+        if (dataList.isEmpty()) return
+        val keys = dataList.first().keys
+        val columns = keys.joinToString(",") { escapeIdentifier(it) }
+        val placeholders = keys.joinToString(",") { "?" }
+        val sql = "INSERT INTO $safeTableName ($columns) VALUES ($placeholders)"
+        val params = dataList.map { data -> keys.map { data[it] }.toTypedArray() }
+        SQLTemplate.batch(sql, params)
+    }
+
+    /**
+     * 批量插入或更新数据（自动包裹事务）
+     * @param dataList 要插入/更新的数据列表（所有 Map 的 key 必须一致）
+     * @param keys 用于冲突检测的唯一键列名列表
+     */
+    fun batchInsertOrUpdate(dataList: List<Map<String, Any?>>, keys: List<String>) {
+        if (dataList.isEmpty()) return
+        val colNames = dataList.first().keys
+        val columns = colNames.joinToString(",") { escapeIdentifier(it) }
+        val placeholders = colNames.joinToString(",") { "?" }
+        val updateCols = colNames.filter { it !in keys }
+
+        val sql = if (updateCols.isEmpty()) {
+            when (Database.getDatabaseType()!!.lowercase()) {
+                "mysql" -> "INSERT IGNORE INTO $safeTableName ($columns) VALUES ($placeholders)"
+                "sqlite" -> "INSERT OR IGNORE INTO $safeTableName ($columns) VALUES ($placeholders)"
+                "postgresql" -> {
+                    val conflictCols = keys.joinToString(",") { escapeIdentifier(it) }
+                    "INSERT INTO $safeTableName ($columns) VALUES ($placeholders) ON CONFLICT($conflictCols) DO NOTHING"
+                }
+                else -> throw IllegalArgumentException("Unsupported database type")
+            }
+        } else {
+            when (Database.getDatabaseType()!!.lowercase()) {
+                "mysql" -> {
+                    val updateClause = updateCols.joinToString(",") {
+                        "${escapeIdentifier(it)}=VALUES(${escapeIdentifier(it)})"
+                    }
+                    "INSERT INTO $safeTableName ($columns) VALUES ($placeholders) ON DUPLICATE KEY UPDATE $updateClause"
+                }
+                "sqlite", "postgresql" -> {
+                    val conflictCols = keys.joinToString(",") { escapeIdentifier(it) }
+                    val updateClause = updateCols.joinToString(",") {
+                        "${escapeIdentifier(it)}=excluded.${escapeIdentifier(it)}"
+                    }
+                    "INSERT INTO $safeTableName ($columns) VALUES ($placeholders) ON CONFLICT($conflictCols) DO UPDATE SET $updateClause"
+                }
+                else -> throw IllegalArgumentException("Unsupported database type")
+            }
+        }
+        val params = dataList.map { data -> colNames.map { data[it] }.toTypedArray() }
+        SQLTemplate.batch(sql, params)
     }
 
     /**
@@ -220,6 +414,84 @@ class SQLTable private constructor(
         val sql = "SELECT $columns FROM $safeTableName $whereClause"
         return SQLTemplate.query(sql, mapper, *params)
     }
+
+    /**
+     * 查询单条数据
+     */
+    fun <T> selectOne(
+        columns: String = "*",
+        where: String? = null,
+        mapper: (java.sql.ResultSet) -> T,
+        vararg params: Any?
+    ): T? {
+        return select(columns, where, mapper, *params).firstOrNull()
+    }
+
+    /**
+     * 查询记录数
+     */
+    fun count(where: String? = null, vararg params: Any?): Long {
+        val whereClause = where?.let { "WHERE $it" } ?: ""
+        val sql = "SELECT COUNT(*) FROM $safeTableName $whereClause"
+        return SQLTemplate.query(sql, { rs -> rs.getLong(1) }, *params).first()
+    }
+
+    /**
+     * 检查是否存在符合条件的记录
+     */
+    fun exists(where: String, vararg params: Any?): Boolean {
+        return count(where, *params) > 0
+    }
+
+    // ===== 查询 DSL =====
+
+    /**
+     * DSL 查询
+     */
+    fun <T> query(mapper: (java.sql.ResultSet) -> T, block: QueryBuilder.() -> Unit): List<T> {
+        val builder = QueryBuilder(safeTableName).apply(block)
+        return SQLTemplate.query(builder.toSql(), mapper, *builder.getParams().toTypedArray())
+    }
+
+    /**
+     * DSL 查询单条
+     */
+    fun <T> queryOne(mapper: (java.sql.ResultSet) -> T, block: QueryBuilder.() -> Unit): T? {
+        val builder = QueryBuilder(safeTableName).apply { block(); limit(1) }
+        return SQLTemplate.query(builder.toSql(), mapper, *builder.getParams().toTypedArray()).firstOrNull()
+    }
+
+    /**
+     * DSL 计数
+     */
+    fun count(block: QueryBuilder.() -> Unit): Long {
+        val builder = QueryBuilder(safeTableName).apply { columns("COUNT(*)"); block() }
+        return SQLTemplate.query(builder.toSql(), { rs -> rs.getLong(1) }, *builder.getParams().toTypedArray()).first()
+    }
+
+    /**
+     * DSL 存在检查
+     */
+    fun exists(block: QueryBuilder.() -> Unit): Boolean {
+        return count(block) > 0
+    }
+
+    /**
+     * DSL 更新
+     */
+    fun update(block: UpdateBuilder.() -> Unit): Int {
+        val builder = UpdateBuilder(safeTableName).apply(block)
+        return SQLTemplate.update(builder.toSql(), *builder.getParams().toTypedArray())
+    }
+
+    /**
+     * DSL 删除
+     */
+    fun delete(block: DeleteBuilder.() -> Unit): Int {
+        val builder = DeleteBuilder(safeTableName).apply(block)
+        return SQLTemplate.update(builder.toSql(), *builder.getParams().toTypedArray())
+    }
+
     /**
      * 表字段定义
      */
@@ -236,14 +508,20 @@ class SQLTable private constructor(
             val constraints = mutableListOf<String>()
             if (primaryKey) {
                 if (autoIncrement) {
-                    if (Database.getDatabaseType()!!.lowercase() == "sqlite") {
-                        // SQLite的自增主键必须是INTEGER PRIMARY KEY
-                        if (type !is ColumnType.Int) {
-                            throw IllegalStateException("SQLite AUTOINCREMENT column must be INTEGER type")
+                    when (Database.getDatabaseType()!!.lowercase()) {
+                        "sqlite" -> {
+                            if (type !is ColumnType.Int) {
+                                throw IllegalStateException("SQLite AUTOINCREMENT column must be INTEGER type")
+                            }
+                            return "$safeName INTEGER PRIMARY KEY AUTOINCREMENT"
                         }
-                        return "$safeName INTEGER PRIMARY KEY AUTOINCREMENT"
-                    } else {
-                        constraints.add("PRIMARY KEY AUTO_INCREMENT")
+                        "postgresql" -> {
+                            val serialType = if (type is ColumnType.BigInt) "BIGSERIAL" else "SERIAL"
+                            return "$safeName $serialType PRIMARY KEY"
+                        }
+                        else -> {
+                            constraints.add("PRIMARY KEY AUTO_INCREMENT")
+                        }
                     }
                 } else {
                     constraints.add("PRIMARY KEY")
@@ -366,6 +644,24 @@ class SQLTable private constructor(
                     is Date, is Time, is Timestamp, is DateTime -> "TEXT"
                 }
 
+                "postgresql" -> when (this) {
+                    is VarChar -> "VARCHAR($length)"
+                    is Char -> "CHAR($length)"
+                    is Decimal -> "DECIMAL($precision,$scale)"
+                    is Int -> "INTEGER"
+                    is BigInt -> "BIGINT"
+                    is TinyInt -> "SMALLINT"
+                    is Text, is LongText -> "TEXT"
+                    is Blob, is LongBlob -> "BYTEA"
+                    is Double -> "DOUBLE PRECISION"
+                    is Float -> "REAL"
+                    is Boolean -> "BOOLEAN"
+                    is Date -> "DATE"
+                    is Time -> "TIME"
+                    is Timestamp -> "TIMESTAMP"
+                    is DateTime -> "TIMESTAMP"
+                }
+
                 else -> throw IllegalArgumentException("Unsupported database type: $databaseType")
             }
         }
@@ -415,6 +711,104 @@ class SQLTable private constructor(
         }
 
         /**
+         * 插入或更新数据（Upsert）
+         * @param data 要插入/更新的数据
+         * @param keys 用于冲突检测的唯一键列名列表
+         */
+        fun insertOrUpdate(data: Map<String, Any?>, keys: List<String>) {
+            val columns = data.keys.joinToString(",") { escapeIdentifier(it) }
+            val placeholders = data.keys.joinToString(",") { "?" }
+            val updateCols = data.keys.filter { it !in keys }
+
+            val sql = if (updateCols.isEmpty()) {
+                when (Database.getDatabaseType()!!.lowercase()) {
+                    "mysql" -> "INSERT IGNORE INTO $safeTableName ($columns) VALUES ($placeholders)"
+                    "sqlite" -> "INSERT OR IGNORE INTO $safeTableName ($columns) VALUES ($placeholders)"
+                    "postgresql" -> {
+                        val conflictCols = keys.joinToString(",") { escapeIdentifier(it) }
+                        "INSERT INTO $safeTableName ($columns) VALUES ($placeholders) ON CONFLICT($conflictCols) DO NOTHING"
+                    }
+                    else -> throw IllegalArgumentException("Unsupported database type")
+                }
+            } else {
+                when (Database.getDatabaseType()!!.lowercase()) {
+                    "mysql" -> {
+                        val updateClause = updateCols.joinToString(",") {
+                            "${escapeIdentifier(it)}=VALUES(${escapeIdentifier(it)})"
+                        }
+                        "INSERT INTO $safeTableName ($columns) VALUES ($placeholders) ON DUPLICATE KEY UPDATE $updateClause"
+                    }
+                    "sqlite", "postgresql" -> {
+                        val conflictCols = keys.joinToString(",") { escapeIdentifier(it) }
+                        val updateClause = updateCols.joinToString(",") {
+                            "${escapeIdentifier(it)}=excluded.${escapeIdentifier(it)}"
+                        }
+                        "INSERT INTO $safeTableName ($columns) VALUES ($placeholders) ON CONFLICT($conflictCols) DO UPDATE SET $updateClause"
+                    }
+                    else -> throw IllegalArgumentException("Unsupported database type")
+                }
+            }
+            sqlContext.update(sql, *data.values.toTypedArray())
+        }
+
+        /**
+         * 批量插入数据
+         */
+        fun batchInsert(dataList: List<Map<String, Any?>>) {
+            if (dataList.isEmpty()) return
+            val keys = dataList.first().keys
+            val columns = keys.joinToString(",") { escapeIdentifier(it) }
+            val placeholders = keys.joinToString(",") { "?" }
+            val sql = "INSERT INTO $safeTableName ($columns) VALUES ($placeholders)"
+            val params = dataList.map { data -> keys.map { data[it] }.toTypedArray() }
+            sqlContext.batch(sql, params)
+        }
+
+        /**
+         * 批量插入或更新数据
+         * @param dataList 要插入/更新的数据列表（所有 Map 的 key 必须一致）
+         * @param keys 用于冲突检测的唯一键列名列表
+         */
+        fun batchInsertOrUpdate(dataList: List<Map<String, Any?>>, keys: List<String>) {
+            if (dataList.isEmpty()) return
+            val colNames = dataList.first().keys
+            val columns = colNames.joinToString(",") { escapeIdentifier(it) }
+            val placeholders = colNames.joinToString(",") { "?" }
+            val updateCols = colNames.filter { it !in keys }
+
+            val sql = if (updateCols.isEmpty()) {
+                when (Database.getDatabaseType()!!.lowercase()) {
+                    "mysql" -> "INSERT IGNORE INTO $safeTableName ($columns) VALUES ($placeholders)"
+                    "sqlite" -> "INSERT OR IGNORE INTO $safeTableName ($columns) VALUES ($placeholders)"
+                    "postgresql" -> {
+                        val conflictCols = keys.joinToString(",") { escapeIdentifier(it) }
+                        "INSERT INTO $safeTableName ($columns) VALUES ($placeholders) ON CONFLICT($conflictCols) DO NOTHING"
+                    }
+                    else -> throw IllegalArgumentException("Unsupported database type")
+                }
+            } else {
+                when (Database.getDatabaseType()!!.lowercase()) {
+                    "mysql" -> {
+                        val updateClause = updateCols.joinToString(",") {
+                            "${escapeIdentifier(it)}=VALUES(${escapeIdentifier(it)})"
+                        }
+                        "INSERT INTO $safeTableName ($columns) VALUES ($placeholders) ON DUPLICATE KEY UPDATE $updateClause"
+                    }
+                    "sqlite", "postgresql" -> {
+                        val conflictCols = keys.joinToString(",") { escapeIdentifier(it) }
+                        val updateClause = updateCols.joinToString(",") {
+                            "${escapeIdentifier(it)}=excluded.${escapeIdentifier(it)}"
+                        }
+                        "INSERT INTO $safeTableName ($columns) VALUES ($placeholders) ON CONFLICT($conflictCols) DO UPDATE SET $updateClause"
+                    }
+                    else -> throw IllegalArgumentException("Unsupported database type")
+                }
+            }
+            val params = dataList.map { data -> colNames.map { data[it] }.toTypedArray() }
+            sqlContext.batch(sql, params)
+        }
+
+        /**
          * 更新数据
          */
         fun update(data: Map<String, Any?>, where: String, vararg params: Any?): Int {
@@ -459,6 +853,71 @@ class SQLTable private constructor(
         }
 
         /**
+         * 查询记录数
+         */
+        fun count(where: String? = null, vararg params: Any?): Long {
+            val whereClause = where?.let { "WHERE $it" } ?: ""
+            val sql = "SELECT COUNT(*) FROM $safeTableName $whereClause"
+            return sqlContext.query(sql, { rs -> rs.getLong(1) }, *params).first()
+        }
+
+        /**
+         * 检查是否存在符合条件的记录
+         */
+        fun exists(where: String, vararg params: Any?): Boolean {
+            return count(where, *params) > 0
+        }
+
+        // ===== 查询 DSL =====
+
+        /**
+         * DSL 查询
+         */
+        fun <T> query(mapper: (java.sql.ResultSet) -> T, block: QueryBuilder.() -> Unit): List<T> {
+            val builder = QueryBuilder(safeTableName).apply(block)
+            return sqlContext.query(builder.toSql(), mapper, *builder.getParams().toTypedArray())
+        }
+
+        /**
+         * DSL 查询单条
+         */
+        fun <T> queryOne(mapper: (java.sql.ResultSet) -> T, block: QueryBuilder.() -> Unit): T? {
+            val builder = QueryBuilder(safeTableName).apply { block(); limit(1) }
+            return sqlContext.query(builder.toSql(), mapper, *builder.getParams().toTypedArray()).firstOrNull()
+        }
+
+        /**
+         * DSL 计数
+         */
+        fun count(block: QueryBuilder.() -> Unit): Long {
+            val builder = QueryBuilder(safeTableName).apply { columns("COUNT(*)"); block() }
+            return sqlContext.query(builder.toSql(), { rs -> rs.getLong(1) }, *builder.getParams().toTypedArray()).first()
+        }
+
+        /**
+         * DSL 存在检查
+         */
+        fun exists(block: QueryBuilder.() -> Unit): Boolean {
+            return count(block) > 0
+        }
+
+        /**
+         * DSL 更新
+         */
+        fun update(block: UpdateBuilder.() -> Unit): Int {
+            val builder = UpdateBuilder(safeTableName).apply(block)
+            return sqlContext.update(builder.toSql(), *builder.getParams().toTypedArray())
+        }
+
+        /**
+         * DSL 删除
+         */
+        fun delete(block: DeleteBuilder.() -> Unit): Int {
+            val builder = DeleteBuilder(safeTableName).apply(block)
+            return sqlContext.update(builder.toSql(), *builder.getParams().toTypedArray())
+        }
+
+        /**
          * 开启事务
          */
         fun beginTransaction() = sqlContext.beginTransaction()
@@ -476,16 +935,6 @@ class SQLTable private constructor(
         /**
          * 在事务中执行操作
          */
-        fun <R> transaction(block: () -> R): R {
-            beginTransaction()
-            try {
-                val result = block()
-                commit()
-                return result
-            } catch (e: Exception) {
-                rollback()
-                throw e
-            }
-        }
+        fun <R> transaction(block: () -> R): R = sqlContext.transaction(block)
     }
 }

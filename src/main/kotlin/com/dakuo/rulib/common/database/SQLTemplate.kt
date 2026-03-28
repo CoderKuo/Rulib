@@ -4,7 +4,10 @@ private val IDENTIFIER_PATTERN = Regex("^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 internal fun escapeIdentifier(name: String): String {
     require(name.matches(IDENTIFIER_PATTERN)) { "Invalid SQL identifier: $name" }
-    return "`$name`"
+    return when (Database.getDatabaseType()?.lowercase()) {
+        "sqlite", "postgresql" -> "\"$name\""
+        else -> "`$name`"
+    }
 }
 
 object SQLTemplate {
@@ -12,7 +15,6 @@ object SQLTemplate {
     private val dataSource: javax.sql.DataSource by lazy {
         Database.dataSource
     }
-
 
     /**
      * 执行更新操作
@@ -56,18 +58,32 @@ object SQLTemplate {
     }
 
     /**
-     * 执行批量更新操作
+     * 执行批量更新操作（自动包裹事务）
      */
     fun batch(sql: String, params: List<Array<Any?>>): IntArray {
         dataSource.connection.use { conn ->
-            conn.prepareStatement(sql).use { stmt ->
-                for (param in params) {
-                    param.forEachIndexed { index, value ->
-                        stmt.setObject(index + 1, value)
+            conn.autoCommit = false
+            try {
+                conn.prepareStatement(sql).use { stmt ->
+                    for (param in params) {
+                        param.forEachIndexed { index, value ->
+                            stmt.setObject(index + 1, value)
+                        }
+                        stmt.addBatch()
                     }
-                    stmt.addBatch()
+                    val result = stmt.executeBatch()
+                    conn.commit()
+                    return result
                 }
-                return stmt.executeBatch()
+            } catch (e: Exception) {
+                try {
+                    conn.rollback()
+                } catch (re: Exception) {
+                    e.addSuppressed(re)
+                }
+                throw e
+            } finally {
+                conn.autoCommit = true
             }
         }
     }
@@ -122,17 +138,40 @@ object SQLTemplate {
         }
 
         /**
-         * 执行批量更新操作
+         * 执行批量更新操作（自动包裹事务，若已在事务中则复用当前事务）
          */
         fun batch(sql: String, params: List<Array<Any?>>): IntArray {
-            connection.prepareStatement(sql).use { stmt ->
-                for (param in params) {
-                    param.forEachIndexed { index, value ->
-                        stmt.setObject(index + 1, value)
+            val wasInTransaction = !connection.autoCommit
+            if (!wasInTransaction) {
+                connection.autoCommit = false
+            }
+            try {
+                connection.prepareStatement(sql).use { stmt ->
+                    for (param in params) {
+                        param.forEachIndexed { index, value ->
+                            stmt.setObject(index + 1, value)
+                        }
+                        stmt.addBatch()
                     }
-                    stmt.addBatch()
+                    val result = stmt.executeBatch()
+                    if (!wasInTransaction) {
+                        connection.commit()
+                    }
+                    return result
                 }
-                return stmt.executeBatch()
+            } catch (e: Exception) {
+                if (!wasInTransaction) {
+                    try {
+                        connection.rollback()
+                    } catch (re: Exception) {
+                        e.addSuppressed(re)
+                    }
+                }
+                throw e
+            } finally {
+                if (!wasInTransaction) {
+                    connection.autoCommit = true
+                }
             }
         }
 
@@ -169,7 +208,11 @@ object SQLTemplate {
                 commit()
                 return result
             } catch (e: Exception) {
-                rollback()
+                try {
+                    rollback()
+                } catch (re: Exception) {
+                    e.addSuppressed(re)
+                }
                 throw e
             }
         }
