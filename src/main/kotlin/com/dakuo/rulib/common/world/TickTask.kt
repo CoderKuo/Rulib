@@ -1,7 +1,7 @@
 package com.dakuo.rulib.common.world
 
 import taboolib.common.platform.function.submit
-import taboolib.common.platform.service.PlatformTask
+import taboolib.common.platform.service.PlatformExecutor
 
 /**
  * 分帧任务调度器
@@ -63,7 +63,7 @@ class TickTask<T> private constructor(
 
     private var index = 0
 
-    private val task: PlatformTask = submit(period = 1L) {
+    private val task: PlatformExecutor.PlatformTask = submit(period = 1L) {
         if (!isRunning) {
             cancel()
             return@submit
